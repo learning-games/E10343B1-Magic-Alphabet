@@ -847,7 +847,15 @@
   };
   const AVOL = { bgm:0.35, correct:0.8, wrong:0.7, win:0.85, click:0.5, box:0.6, jackpot:0.9 };
   const Audio = (function(){
-    const els={}; let muted=false, master=0.6, attached=false, letterEl=null;
+    const els={}; let muted=false, master=0.6, attached=false, letterEl=null, letterPrimed=false;
+    const SILENT_WAV='data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=';
+    function ensureLetterEl(){ if(!letterEl){ letterEl=new window.Audio(); letterEl.preload='auto'; letterEl.setAttribute('playsinline',''); } return letterEl; }
+    // ปลดล็อกเสียงโจทย์บน iOS/iPad: เล่นคลิปเงียบ 1 ครั้ง "ในจังหวะแตะ" -> element นี้เล่นได้แม้ไม่แตะภายหลัง (โหมดกล้อง)
+    function primeLetter(){
+      if(letterPrimed) return; const el=ensureLetterEl();
+      try{ el.onended=null; el.onerror=null; el.muted=false; el.volume=1; el.src=SILENT_WAV;
+        const pr=el.play(); if(pr&&pr.then) pr.then(()=>{letterPrimed=true;}).catch(()=>{}); else letterPrimed=true; }catch(_){}
+    }
     const live=new Set();   // node เสียงเอฟเฟกต์ที่กำลังเล่น (ใช้หยุดทันทีตอนออกจากสนาม)
     function attach(){
       if(attached) return; attached=true;
@@ -876,7 +884,7 @@
       }catch(_){}
     }
     return {
-      unlock(){ attach(); },
+      unlock(){ attach(); primeLetter(); },   // ปลดล็อกเสียงโจทย์ทุกครั้งที่มี gesture
       correct(){ attach(); play('correct'); },
       wrong(){ attach(); play('wrong'); },
       click(){ attach(); play('click'); },
@@ -893,15 +901,19 @@
           a.play()?.catch(()=>{}); }catch(_){}
       },
       // เสียงโจทย์: เล่นไฟล์ตามชื่อตัวอักษร เช่น A -> question/A.mp3 (สร้าง element ใหม่ทุกครั้ง รองรับ A–Z)
-      playLetter(ch){
+      // เสียงโจทย์: ใช้ element เดียวซ้ำ (iPad เล่นได้แม้ไม่แตะ ถ้าปลดล็อกแล้ว) + callback เมื่อเล่นจบ/พลาด
+      playLetter(ch, onEnd){
         attach();
-        if(!ch) return;                                       // เสียงโจทย์เล่นตลอด 100% ปิดไม่ได้
+        let done=false; const fire=()=>{ if(done) return; done=true; if(onEnd) onEnd(); };
+        if(!ch){ fire(); return; }
         try{
-          if(letterEl){ try{ letterEl.pause(); }catch(_){} }
-          letterEl=new window.Audio('question/'+ch+'.mp3');
-          letterEl.volume=1;
-          letterEl.play()?.catch(()=>{});
-        }catch(_){}
+          const el=ensureLetterEl();
+          el.onended=fire; el.onerror=fire;
+          el.muted=false; el.volume=1;
+          el.src='question/'+ch+'.mp3';
+          try{ el.currentTime=0; }catch(_){}
+          const pr=el.play(); if(pr&&pr.catch) pr.catch(()=>{ fire(); });   // เล่นไม่ได้ -> ปลดล็อกทันที กันค้าง
+        }catch(_){ fire(); }
       },
       startBGM(){ attach(); play('bgm'); },
       restartBGM(){ attach(); if(els.bgm){ try{ els.bgm.currentTime=0; }catch(_){} } play('bgm'); },   // เริ่มเพลงจากต้นเสมอ (เกมใหม่)
@@ -919,7 +931,7 @@
 
   /* ---------------- game state ---------------- */
   const TOTAL = 10;
-  const state = { level:'add', qIndex:0, score:0, correct:0, answered:false, paused:false, time:0, timer:null, current:null, interTimer:null, interActive:false, inputLocked:false, pendingEffect:null, activeEffect:null, interHold:false, attempts:0, specialUsed:false, awaitingFood:false, foodTimeout:null, nextTimer:null, qSoundTimer:null, replayTimer:null };
+  const state = { level:'add', qIndex:0, score:0, correct:0, answered:false, paused:false, time:0, timer:null, current:null, interTimer:null, interActive:false, inputLocked:false, pendingEffect:null, activeEffect:null, interHold:false, attempts:0, specialUsed:false, awaitingFood:false, foodTimeout:null, nextTimer:null, qSoundTimer:null, replayTimer:null, lockSafety:null };
 
   const $ = id=>document.getElementById(id);
   const screens = { home:$('home'), play:$('play'), summary:$('summary') };
@@ -985,8 +997,9 @@
   function npcPick(){ npcSrc='image/npc'+(1+((Math.random()*5)|0))+'.webp'; }   // สุ่มตัวใหม่ (เรียกตอนขึ้นข้อใหม่)
   function npcClearTimers(){ clearTimeout(npcSpeakTimer); clearTimeout(npcHideTimer); clearTimeout(npcOutTimer); }
   function npcHideNow(){ npcClearTimers(); const el=$('npc'); if(el){ el.classList.remove('show'); el.style.display='none'; } }
-  function npcSpeak(ch){
-    const el=$('npc'); if(!el||!ch) return;
+  function unlockInput(){ state.inputLocked=false; clearTimeout(state.lockSafety); state.lockSafety=null; }
+  function npcSpeak(ch, onEnd){
+    const el=$('npc'); if(!el||!ch){ if(onEnd) onEnd(); return; }
     npcClearTimers();
     if(!npcSrc) npcPick();
     el.src=npcSrc;
@@ -995,7 +1008,7 @@
     el.classList.add('show');                  // เริ่มเลื่อนเข้า
     // รอให้เลื่อนเข้าเสร็จ (นิ่ง) ก่อน แล้วค่อยพูด — เสียงนี้คือ "เสียงของ NPC"
     npcSpeakTimer=setTimeout(()=>{
-      Audio.playLetter(ch);
+      Audio.playLetter(ch, onEnd);   // เล่นจบ -> onEnd (ปลดล็อกให้ตอบ)
       npcHideTimer=setTimeout(()=>{           // พูดเสร็จ ค้างไว้ครู่ แล้วเลื่อนออกเอง
         el.classList.remove('show');
         npcOutTimer=setTimeout(()=>{ el.style.display='none'; }, NPC_OUT_DUR);
@@ -1037,13 +1050,13 @@
     });
     // NPC สุ่มตัวใหม่ของข้อนี้ + เริ่มเลื่อนเข้าก่อนนิดหน่อย (350ms) -> นิ่งแล้วค่อยพูด (เสียง = เสียง NPC)
     npcPick();
-    state.qSoundTimer=setTimeout(()=>{ npcSpeak(q.sound); }, 350);
+    state.qSoundTimer=setTimeout(()=>{ npcSpeak(q.sound, unlockInput); }, 350);   // ปลดล็อกให้ตอบได้หลังเสียงโจทย์จบ
     clearInterval(state.replayTimer);
     state.replayTimer=setInterval(()=>{
       if(state.answered||state.paused||state.awaitingFood||!screens.play.classList.contains('active')) return;
       if(state.current) npcSpeak(state.current.sound);   // เล่นซ้ำ = NPC ตัวเดิมโผล่มาพูดอีก (มีเสียง = มี NPC เสมอ)
     }, 10000);
-    setTimeout(()=>{ state.inputLocked=false; }, 700);
+    clearTimeout(state.lockSafety); state.lockSafety=setTimeout(unlockInput, 9000);   // safety: กันค้าง ปลดล็อกแน่นอนใน 9 วิ
   }
 
   /* ---------------- ตำแหน่งตายตัว (แนวโค้ง) + เอฟเฟคลอย ---------------- */
@@ -1110,6 +1123,7 @@
     clearTimeout(state.nextTimer); state.nextTimer=null;
     clearTimeout(state.qSoundTimer); state.qSoundTimer=null;
     clearInterval(state.replayTimer); state.replayTimer=null;
+    clearTimeout(state.lockSafety); state.lockSafety=null;
     state.interActive=false; state.interHold=false; state.awaitingFood=false;
     state.pendingEffect=null; state.activeEffect=null; state.inputLocked=false;
     clearSpecialEmojis();                                   // อีโมจิ (อาหาร/อีเวนต์)
