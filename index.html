@@ -857,6 +857,27 @@
         const pr=el.play(); if(pr&&pr.then) pr.then(()=>{letterPrimed=true;}).catch(()=>{}); else letterPrimed=true; }catch(_){}
     }
     const live=new Set();   // node เสียงเอฟเฟกต์ที่กำลังเล่น (ใช้หยุดทันทีตอนออกจากสนาม)
+    // ===== เอฟเฟกต์: pre-unlocked pool (iPad เล่นได้แม้ไม่แตะ เช่นโหมดกล้อง) =====
+    const FX_KEYS=['correct','wrong','win','click','box','jackpot'];
+    const SFX_SRCS=['image/eat.mp3'];
+    const POOL_N=4;
+    const fxPool={}, fxIdx={}, sfxPool={}, sfxIdx={}; let fxPrimed=false;
+    function makePool(src){ const a=[]; for(let i=0;i<POOL_N;i++){ const el=new window.Audio(); el.preload='auto'; el.setAttribute('playsinline',''); el.src=src; a.push(el); } return a; }
+    function primeFx(){   // ปลดล็อก element เอฟเฟกต์ทั้งหมดด้วย muted-play (ครั้งเดียว ในจังหวะแตะ)
+      if(fxPrimed) return; fxPrimed=true;
+      const all=[]; for(const k in fxPool) all.push(...fxPool[k]); for(const q in sfxPool) all.push(...sfxPool[q]);
+      all.forEach(el=>{ try{ el.muted=true; const p=el.play();
+        if(p&&p.then) p.then(()=>{ try{ el.pause(); el.currentTime=0; }catch(_){} el.muted=false; }).catch(()=>{ el.muted=false; });
+        else { try{ el.pause(); }catch(_){} el.muted=false; } }catch(_){} });
+    }
+    function playPool(pool, idxMap, key, vol){   // เล่นจาก pool (element ปลดล็อกแล้ว) แบบวนรอบ
+      const arr=pool[key]; if(!arr||!arr.length) return;
+      const i=idxMap[key]||0; idxMap[key]=(i+1)%arr.length;
+      const el=arr[i%arr.length];
+      try{ el.muted=false; el.volume=vol; try{ el.currentTime=0; }catch(_){}
+        live.add(el); const off=()=>live.delete(el); el.onended=off; el.onpause=off;
+        el.play()?.catch(()=>{}); }catch(_){}
+    }
     function attach(){
       if(attached) return; attached=true;
       for(const k in AUDIO_SRC){
@@ -867,6 +888,8 @@
         els[k]=el;
       }
       if(els.bgm){ els.bgm.loop=true; els.bgm.volume=AVOL.bgm*master; }
+      FX_KEYS.forEach(k=>{ if(AUDIO_SRC[k] && !fxPool[k]){ fxPool[k]=makePool(AUDIO_SRC[k]); fxIdx[k]=0; } });
+      SFX_SRCS.forEach(src=>{ if(!sfxPool[src]){ sfxPool[src]=makePool(src); sfxIdx[src]=0; } });
     }
     function play(key){
       const el=els[key]; if(!el||!el.src) return;
@@ -875,16 +898,13 @@
           if(muted) return;                                   // ปิดเสียง/สไลเดอร์ = คุมเฉพาะเพลงพื้นหลัง
           els.bgm.volume=AVOL.bgm*master; el.play()?.catch(()=>{});
         }else{
-          // เสียงเอฟเฟกต์อื่นๆ เล่นตลอด ไม่ขึ้นกับสไลเดอร์/ปุ่มปิดเสียง
-          const n=el.cloneNode(); n.volume=(AVOL[key]??0.7);
-          live.add(n); const off=()=>live.delete(n);
-          n.addEventListener('ended',off,{once:true}); n.addEventListener('pause',off,{once:true});
-          n.play()?.catch(()=>{});
+          // เสียงเอฟเฟกต์: เล่นจาก pool ที่ปลดล็อกไว้ล่วงหน้า (iPad เล่นได้แม้ไม่แตะ)
+          playPool(fxPool, fxIdx, key, (AVOL[key]??0.7));
         }
       }catch(_){}
     }
     return {
-      unlock(){ attach(); primeLetter(); },   // ปลดล็อกเสียงโจทย์ทุกครั้งที่มี gesture
+      unlock(){ attach(); primeLetter(); primeFx(); },   // ปลดล็อกเสียงโจทย์ + เอฟเฟกต์ทุกครั้งที่มี gesture
       correct(){ attach(); play('correct'); },
       wrong(){ attach(); play('wrong'); },
       click(){ attach(); play('click'); },
@@ -895,10 +915,8 @@
       sfx(src){
         attach();
         if(!src) return;                                      // เล่นตลอด 100% ปิดไม่ได้
-        try{ const a=new window.Audio(src); a.volume=1;
-          live.add(a); const off=()=>live.delete(a);
-          a.addEventListener('ended',off,{once:true}); a.addEventListener('pause',off,{once:true});
-          a.play()?.catch(()=>{}); }catch(_){}
+        if(!sfxPool[src]){ sfxPool[src]=makePool(src); sfxIdx[src]=0; }   // src ใหม่: สร้าง pool
+        playPool(sfxPool, sfxIdx, src, 1);
       },
       // เสียงโจทย์: เล่นไฟล์ตามชื่อตัวอักษร เช่น A -> question/A.mp3 (สร้าง element ใหม่ทุกครั้ง รองรับ A–Z)
       // เสียงโจทย์: ใช้ element เดียวซ้ำ (iPad เล่นได้แม้ไม่แตะ ถ้าปลดล็อกแล้ว) + callback เมื่อเล่นจบ/พลาด
